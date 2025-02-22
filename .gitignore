@@ -1,0 +1,4 @@
+.env
+.wg-list.txt
+.hosts
+wg0.conf/*.conf

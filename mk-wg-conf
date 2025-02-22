@@ -1,0 +1,97 @@
+#!/bin/bash
+
+# mkdir wg0.conf
+#
+# ./oci-free . instance-list | awk -F, '{print $2}' | xargs -P8 -I % sh -c "./mk-wg-conf '%' > wg0.conf/'%'.conf"
+#
+# cat .wg-list.txt | awk '{print $1}' | xargs -P8 -I % sh -c "./mk-wg-conf '%' > wg0.conf/'%'.conf"
+
+# Load .env file
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "❌ .env file not found."
+    exit 1
+fi
+
+# Check input argument
+if [ "$#" -ne 1 ]; then
+    echo "❌ Usage: $0 <hostname>"
+    exit 1
+fi
+
+TARGET_HOSTNAME="$1"
+WG_LIST_FILE=".wg-list.txt"
+
+# Check if `.wg-list.txt` exists
+if [ ! -f "$WG_LIST_FILE" ]; then
+    echo "❌ WireGuard list file '$WG_LIST_FILE' not found."
+    exit 1
+fi
+
+# Read wg-list.txt, normalize whitespace (convert tabs to spaces), and find the corresponding hostname
+MATCHED_LINE=$(awk -v host="$TARGET_HOSTNAME" '$1 == host {print}' "$WG_LIST_FILE")
+
+if [ -z "$MATCHED_LINE" ]; then
+    echo "❌ Hostname '$TARGET_HOSTNAME' not found in '$WG_LIST_FILE'."
+    exit 1
+fi
+
+# Extract values
+PRIVATE_IP=$(echo "$MATCHED_LINE" | awk '{print $2}')
+PRIVATE_KEY=$(echo "$MATCHED_LINE" | awk '{print $3}')
+PUBLIC_KEY=$(echo "$MATCHED_LINE" | awk '{print $4}')
+
+# Generate WireGuard configuration
+cat <<EOF
+[Interface]
+Address = $PRIVATE_IP/24
+PrivateKey = $PRIVATE_KEY
+ListenPort = $WG_PORT
+
+EOF
+
+PUBLIC_FQDN="$TARGET_HOSTNAME.$DOMAIN"
+PUBLIC_IP_FROM_DNS=$(dig +short "$PUBLIC_FQDN" | head -n 1)
+
+if [ "$PUBLIC_IP_FROM_DNS" ] && [ "$PUBLIC_IP_FROM_DNS" != "1.1.1.1" ]; then
+cat <<EOF
+PostUp = iptables -t nat -I POSTROUTING 1 -s "$PRIVATE_IP/24" -o enp0s3 -j MASQUERADE
+PostUp = iptables -I INPUT 1 -i wg0 -j ACCEPT
+PostUp = iptables -I FORWARD 1 -i enp0s3 -o wg0 -j ACCEPT
+PostUp = iptables -I FORWARD 1 -i wg0 -o enp0s3 -j ACCEPT
+PostUp = iptables -I INPUT 1 -i enp0s3 -p udp --dport $WG_PORT -j ACCEPT
+
+PostDown = iptables -t nat -D POSTROUTING 1 -s "$PRIVATE_IP/24" -o enp0s3 -j MASQUERADE
+PostDown = iptables -D INPUT 1 -i wg0 -j ACCEPT
+PostDown = iptables -D FORWARD 1 -i enp0s3 -o wg0 -j ACCEPT
+PostDown = iptables -D FORWARD 1 -i wg0 -o enp0s3 -j ACCEPT
+PostDown = iptables -D INPUT 1 -i enp0s3 -p udp --dport $WG_PORT -j ACCEPT
+EOF
+fi
+
+# Loop through all other peers
+while read -r HOSTNAME PEER_IP PEER_PRIVATE_KEY PEER_PUBLIC_KEY; do
+    # Skip the target hostname itself
+    [ "$HOSTNAME" == "$TARGET_HOSTNAME" ] && continue
+
+    # Check if hostname.$DOMAIN resolves
+    PEER_FQDN="$HOSTNAME.$DOMAIN"
+    PEER_IP_FROM_DNS=$(dig +short "$PEER_FQDN" | head -n 1)
+
+    # Detect wildcard DNS
+    if [ -z "$PEER_IP_FROM_DNS" ] || [ "$PEER_IP_FROM_DNS" == "1.1.1.1" ]; then
+        ENDPOINT_LINE=""
+    else
+        ENDPOINT_LINE="Endpoint = $PEER_FQDN:$WG_PORT"
+    fi
+
+    cat <<EOF
+
+[Peer]
+PublicKey = $PEER_PUBLIC_KEY
+AllowedIPs = $PEER_IP
+$ENDPOINT_LINE
+EOF
+done < "$WG_LIST_FILE"
+

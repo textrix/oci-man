@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# wg ip update
+# cat .wg-list.txt | awk '{print "A", "wg."$1, $2}' | xargs -n3 bash -c './cf-ddns "$1" "$2" "$3"' _
+# ip update
+# ./oci-man . ip-list | xargs -P4 -n3 bash -c './cf-ddns "$1" "$2" "$3"' _
+# ipv6 update
+# ./oci-man . ipv6-list | xargs -P4 -n3 bash -c './cf-ddns "$1" "$2" "$3"' _
+
+# Load .env file
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "❌ .env file not found."
+    exit 1
+fi
+
+# Check input arguments
+if [ "$#" -ne 3 ]; then
+    echo "❌ Usage: $0 <record_type (A/AAAA)> <host_name> <public_ip>"
+    exit 1
+fi
+
+# Assign input values
+RECORD_TYPE="$1"
+HOST_NAME="$2"
+PUBLIC_IP="$3"
+
+# Validate RECORD_TYPE
+if [ "$RECORD_TYPE" != "A" ] && [ "$RECORD_TYPE" != "AAAA" ]; then
+    echo "❌ Invalid record type. Use 'A' for IPv4 or 'AAAA' for IPv6."
+    exit 1
+fi
+
+# API URL with filters
+BASE_URL="https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records"
+API_URL="$BASE_URL?type=$RECORD_TYPE&name=$HOST_NAME.$DOMAIN"
+HEADERS=(-H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json")
+
+# ✅ Fetch existing record ID
+API_RESPONSE=$(curl -s -X GET "$API_URL" "${HEADERS[@]}")
+
+# Check if API response is empty or failed
+if [ -z "$API_RESPONSE" ] || [ "$API_RESPONSE" == "null" ]; then
+    echo "❌ API response is empty. Please check API Token and Zone ID."
+    exit 1
+fi
+
+# Check if API request was successful
+if ! echo "$API_RESPONSE" | jq -e '.success' > /dev/null; then
+    echo "❌ API request failed: $(echo "$API_RESPONSE" | jq -r '.errors | .[] | .message')"
+    exit 1
+fi
+
+# Extract existing record ID (avoid null error)
+RECORD_ID=$(echo "$API_RESPONSE" | jq -r ".result[]? | .id")
+
+# Common data for POST and PUT requests
+DATA=$(jq -n --arg type "$RECORD_TYPE" --arg name "$HOST_NAME" --arg content "$PUBLIC_IP" \
+    '{ type: $type, name: $name, content: $content, ttl: 120, proxied: false }')
+
+if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
+    #echo "🔍 No existing DNS record found. Creating a new record."
+
+    # ✅ Create a new DNS record
+    RESPONSE=$(curl -s -X POST "$API_URL" "${HEADERS[@]}" --data "$DATA")
+
+    if echo "$RESPONSE" | jq -e '.success' > /dev/null; then
+        echo "✅ New DNS record created: $HOST_NAME.$DOMAIN -> $PUBLIC_IP"
+    else
+        echo "❌ Failed to create DNS record: $(echo "$RESPONSE" | jq -r '.errors | .[] | .message')"
+    fi
+else
+    #echo "✅ Existing DNS record found (ID: $RECORD_ID). Updating the record."
+
+    # ✅ Update the existing DNS record
+    RESPONSE=$(curl -s -X PUT "$BASE_URL/$RECORD_ID" "${HEADERS[@]}" --data "$DATA")
+
+    if echo "$RESPONSE" | jq -e '.success' > /dev/null; then
+        echo "✅ DNS record updated: $HOST_NAME.$DOMAIN -> $PUBLIC_IP"
+    else
+        echo "❌ Failed to update DNS record: $(echo "$RESPONSE" | jq -r '.errors | .[] | .message')"
+    fi
+fi

@@ -1,0 +1,84 @@
+---
+- name: test
+  hosts: oci
+  become: yes
+  tasks:
+    - name: Asia/Seoul
+      timezone: name=Asia/Seoul
+
+    - name: Check if swap file exists
+      stat:
+        path: /swapfile
+      register: swapfile_stat
+
+    - name: Create swap file if not exists
+      command: fallocate -l 2G /swapfile
+      when: not swapfile_stat.stat.exists
+
+    - name: Set correct permissions on swap file
+      file:
+        path: /swapfile
+        mode: '0600'
+      when: not swapfile_stat.stat.exists
+
+    - name: Make swap space
+      command: mkswap /swapfile
+      when: not swapfile_stat.stat.exists
+
+    - name: Enable swap file
+      command: swapon /swapfile
+      when: not swapfile_stat.stat.exists
+
+    - name: Ensure swap file is present in /etc/fstab
+      lineinfile:
+        path: /etc/fstab
+        line: '/swapfile none swap sw 0 0'
+        state: present
+      when: not swapfile_stat.stat.exists
+
+    - name: Verify swap is active
+      command: swapon --show
+      register: swap_status
+      changed_when: false
+
+    - debug:
+        var: swap_status.stdout_lines
+
+    #- meta: end_play
+
+    - name: update upgrade
+      apt:
+        upgrade: "yes"
+        update_cache: yes
+        cache_valid_time: 86400 # one day
+
+    - name: touch /var/log/auth.log for fail2ban bug
+      file:
+        path: /var/log/auth.log
+        state: touch
+        modification_time: preserve
+        access_time: preserve
+        
+    - name: install fail2ban
+      apt:
+        pkg:
+          - fail2ban
+          - net-tools
+          - iputils-ping
+          - vim
+          - jq
+          - rsyslog
+          - cron
+        state: present
+        update_cache: true
+
+    - name: Reboot box if kernel/libs updated and requested by the system
+      shell: sleep 10 && /sbin/shutdown -r now 'Rebooting box to update system libs/kernel as needed' 
+      args:
+        removes: /var/run/reboot-required
+      async: 300
+      poll: 0
+      ignore_errors: true
+      changed_when: false
+
+

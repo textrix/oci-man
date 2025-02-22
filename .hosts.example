@@ -1,0 +1,4 @@
+[oci]
+test1.exmample.org ansible_user=test1
+test2.exmample.org ansible_user=test2
+test3.exmample.org ansible_user=test3

@@ -1,0 +1,120 @@
+#!/bin/bash
+
+# example usage:
+# ./oci-man . instance-list
+# ./oci-man PROFILE_NAME ip-list
+
+set -e # Exit immediately if a command exits with a non-zero status
+set -o noglob
+
+PIDS=""
+RESULT=0
+
+# Check if the OCI config file exists
+CONFIG=${CONFIG:-$HOME/.oci/config}
+[ ! -f "$CONFIG" ] && { echo "Error: OCI config file not found!"; exit 1; }
+
+# ini_get_sections <file>
+function ini_get_sections {
+    awk -F'[][]' '/\[/ {gsub(/[][]/, ""); print $1}' "$1"
+}
+
+# ini_get_value <file> <section> <key>
+function ini_get_value {
+    awk -F= -v section="$2" -v key="$3" '
+        $0 ~ "^\\[" section "\\]" {found=1; next} 
+        found && $0 ~ "^\\[.*\\]" {found=0} 
+        found && $1 ~ "^[ \\t]*" key "[ \\t]*" {gsub(/^[ \\t]+|[ \\t]+$/, "", $2); print $2; exit}' "$1"
+}
+
+# get_TID <profile>
+function get_TID {
+    ini_get_value "$CONFIG" "$1" "tenancy"
+}
+
+# oci-help
+function oci-help {
+    echo "Usage: $0 <profile> <command>"
+    echo -e "\nAvailable Commands:"
+    declare -F | awk '{print $NF}' | grep '^oci-' | sed 's/^oci-/\t/' | sort
+}
+
+# oci-instance-list <profile> <TID>
+function oci-instance-list {
+    local PROFILE=$1; local TID=$2
+    oci --profile "$PROFILE" compute instance list -c "$TID" --all \
+        | jq -r ".data[] | select(.\"lifecycle-state\" == \"RUNNING\") | \"$PROFILE,\" + .\"display-name\" + \",\" + .id"
+}
+
+# oci-ip-list <profile> <TID> [instance-name]
+function oci-ip-list {
+    local PROFILE=$1; local TID=$2; local INPUT_INAME=${3:-.}
+
+    oci-instance-list "$PROFILE" "$TID" | while IFS=, read _ INAME IID; do
+        if [[ "$INAME" =~ $INPUT_INAME ]]; then
+            oci --profile "$PROFILE" compute instance list-vnics -c "$TID" --instance-id "$IID" \
+                | jq -r --arg INAME "$INAME" '"A " + $INAME + " " + .data[]."public-ip"'
+        fi
+    done
+}
+
+# oci-ipv6-list <profile> <TID> [instance-name]
+function oci-ipv6-list {
+    local PROFILE=$1; local TID=$2; local INPUT_INAME=${3:-.}
+
+    oci-instance-list "$PROFILE" "$TID" | while IFS=, read _ INAME IID; do
+        if [[ "$INAME" =~ $INPUT_INAME ]]; then
+            local VNIC_DATA=$(oci --profile "$PROFILE" compute instance list-vnics -c "$TID" --instance-id "$IID")
+            local VNIC_ID=$(echo "$VNIC_DATA" | jq -r '.data[].id')
+            local SUBNET_ID=$(echo "$VNIC_DATA" | jq -r '.data[]."subnet-id"')
+            oci --profile "$PROFILE" network ipv6 list --vnic-id "$VNIC_ID" --subnet-id "$SUBNET_ID" \
+                | jq -r --arg INAME "$INAME" '"AAAA " + $INAME + " " + .data[]."ip-address"'
+        fi
+    done
+}
+
+# oci-change-name <profile> <TID> <instance-name> <new-name>
+function oci-change-name {
+    local PROFILE=$1; local TID=$2; local INPUT_INAME=$3; local INPUT_DNAME=$4
+    [[ -z "$INPUT_DNAME" ]] && { echo "Error: New name is required!"; exit 1; }
+    
+    oci-instance-list "$PROFILE" "$TID" | while IFS=, read _ INAME IID; do
+        if [[ "$INAME" == "$INPUT_INAME" ]]; then
+            oci --profile "$PROFILE" compute instance update --instance-id "$IID" --display-name "$INPUT_DNAME" \
+                | jq -r '.data."display-name"'
+        fi
+    done
+}
+
+# If there are no arguments, execute oci-help
+if [ $# -lt 2 ]; then
+    oci-help
+    exit 1
+fi
+
+# Parse the input arguments
+INPUT_PROFILE=$1; shift
+INPUT_COMMAND=$1; shift
+
+# Execute the command for each profile
+PROFILE_ARRAY=( $(ini_get_sections "$CONFIG") )
+for PROFILE in "${PROFILE_ARRAY[@]}"; do
+    # Skip the DEFAULT profile
+    [[ "$PROFILE" == "DEFAULT" ]] && continue
+    # Skip if the profile does not match the input profile
+    [[ "$PROFILE" =~ $INPUT_PROFILE ]] || continue
+    
+    # Execute the command in the background
+    TID=$(get_TID "$PROFILE")
+    eval "oci-$INPUT_COMMAND $PROFILE $TID $@" &
+    PIDS+="$! "
+    
+    sleep 0.1 # Small delay to increase stability
+done
+
+# Wait for all background processes to finish
+for pid in $PIDS; do
+    if ! wait $pid; then RESULT=1; fi
+done
+
+exit $RESULT
