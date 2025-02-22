@@ -2,7 +2,7 @@
 
 # mkdir wg0.conf
 #
-# ./oci-free . instance-list | awk -F, '{print $2}' | xargs -P8 -I % sh -c "./mk-wg-conf '%' > wg0.conf/'%'.conf"
+# ./oci-man . instance-list | awk -F, '{print $2}' | xargs -P8 -I % sh -c "./mk-wg-conf '%' > wg0.conf/'%'.conf"
 #
 # cat .wg-list.txt | awk '{print $1}' | xargs -P8 -I % sh -c "./mk-wg-conf '%' > wg0.conf/'%'.conf"
 
